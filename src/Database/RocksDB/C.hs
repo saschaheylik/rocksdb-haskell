@@ -12,7 +12,11 @@
 
 module Database.RocksDB.C
     ( RocksDB
+    , TxnRocksDB
+    , Txn
     , Options
+    , TxnOpts
+    , TxnDBOpts
     , ReadOpts
     , WriteOpts
     , ColumnFamily
@@ -27,8 +31,11 @@ module Database.RocksDB.C
     , Key
     , Val
     , c_rocksdb_open
+    , c_rocksdb_transactiondb_open
+    , c_rocksdb_transaction_begin
     , c_rocksdb_open_column_families
     , c_rocksdb_close
+    , c_rocksdb_transactiondb_close
     , c_rocksdb_create_column_family
     , c_rocksdb_drop_column_family
     , c_rocksdb_column_family_handle_destroy
@@ -86,7 +93,16 @@ module Database.RocksDB.C
     , c_rocksdb_readoptions_set_snapshot
     , c_rocksdb_writeoptions_create
     , c_rocksdb_writeoptions_destroy
+    , c_rocksdb_transactiondb_options_create
+    , c_rocksdb_transactiondb_options_destroy
+    , c_rocksdb_transaction_options_create
+    , c_rocksdb_transaction_options_destroy
+    , c_rocksdb_transaction_commit
     , c_rocksdb_free
+    , c_rocksdb_transaction_put
+    , c_rocksdb_transaction_get
+    , c_rocksdb_transaction_delete
+    , c_rocksdb_transaction_get_for_update
     ) where
 
 import           Foreign
@@ -94,9 +110,13 @@ import           Foreign.C.String
 import           Foreign.C.Types
 
 data LRocksDB
+data LTxn
+data LTxnRocksDB
 data LColumnFamily
 data LIterator
 data LOptions
+data LTxnOpts
+data LTxnDBOpts
 data LBlockBasedOptions
 data LReadOpts
 data LSnapshot
@@ -106,10 +126,14 @@ data LFilterPolicy
 data LSliceTransform
 
 type RocksDB            = Ptr LRocksDB
+type Txn                = Ptr LTxn
+type TxnRocksDB         = Ptr LTxnRocksDB
+type TxnOpts            = Ptr LTxnOpts
+type TxnDBOpts          = Ptr LTxnDBOpts
 type ColumnFamily       = Ptr LColumnFamily
 type Options            = Ptr LOptions
 type WriteBatch         = Ptr LWriteBatch
-type SliceTransform      = Ptr LSliceTransform
+type SliceTransform     = Ptr LSliceTransform
 type ReadOpts           = Ptr LReadOpts
 type WriteOpts          = Ptr LWriteOpts
 type Snapshot           = Ptr LSnapshot
@@ -285,7 +309,7 @@ foreign import ccall safe "rocksdb/c.h rocksdb_iter_destroy"
   c_rocksdb_iter_destroy :: Iterator -> IO ()
 
 foreign import ccall safe "rocksdb/c.h rocksdb_iter_valid"
-  c_rocksdb_iter_valid :: Iterator -> IO CUChar
+  c_rocksdb_iter_valid :: Iterator -> IO CBool
 
 foreign import ccall safe "rocksdb/c.h rocksdb_iter_seek_to_first"
   c_rocksdb_iter_seek_to_first :: Iterator -> IO ()
@@ -447,3 +471,87 @@ foreign import ccall safe "rocksdb/c.h rocksdb_writeoptions_destroy"
 
 foreign import ccall safe "rocksdb/c.h rocksdb_free"
   c_rocksdb_free :: CString -> IO ()
+
+-- Transactions
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transactiondb_open"
+    c_rocksdb_transactiondb_open :: Options -> TxnDBOpts -> DBName -> ErrPtr ->
+                                        IO TxnRocksDB
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transactiondb_close"
+  c_rocksdb_transactiondb_close :: TxnRocksDB -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transactiondb_options_create"
+    c_rocksdb_transactiondb_options_create :: IO TxnDBOpts
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transactiondb_options_destroy"
+    c_rocksdb_transactiondb_options_destroy :: TxnDBOpts -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transaction_options_create"
+    c_rocksdb_transaction_options_create :: IO TxnOpts
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transaction_options_destroy"
+    c_rocksdb_transaction_options_destroy :: TxnOpts -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transaction_begin"
+  c_rocksdb_transaction_begin :: TxnRocksDB -> WriteOpts -> TxnOpts -> CInt -> IO Txn
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transaction_commit"
+  c_rocksdb_transaction_commit :: Txn -> ErrPtr -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transactiondb_put"
+  c_rocksdb_transactiondb_put :: TxnRocksDB -> WriteOpts
+                -> Key -> CSize
+                -> Val -> CSize
+                -> ErrPtr
+                -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transaction_put"
+  c_rocksdb_transaction_put :: Txn
+                -> Key -> CSize
+                -> Val -> CSize
+                -> ErrPtr
+                -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transaction_get"
+  c_rocksdb_transaction_get :: Txn
+                -> ReadOpts
+                -> Key -> CSize
+                -> Ptr CSize        -- ^ value length
+                -> ErrPtr
+                -> IO CString
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transactiondb_get"
+  c_rocksdb_transactiondb_get :: TxnRocksDB
+                -> ReadOpts
+                -> Key -> CSize
+                -> Ptr CSize        -- ^ value length
+                -> ErrPtr
+                -> IO CString
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transaction_get_for_update"
+  c_rocksdb_transaction_get_for_update :: Txn
+                -> ReadOpts
+                -> Key -> CSize
+                -> Ptr CSize        -- ^ value length
+                -> CBool -- exclusive (boolean), default is true
+                -> ErrPtr
+                -> IO CString
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transaction_delete"
+  c_rocksdb_transaction_delete :: Txn
+                   -> Key -> CSize
+                   -> ErrPtr
+                   -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transactiondb_delete"
+  c_rocksdb_transactiondb_delete :: TxnRocksDB -> WriteOpts
+                   -> Key -> CSize
+                   -> ErrPtr
+                   -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transaction_get_snapshot"
+  c_rocksdb_transaction_get_snapshot :: Txn -> IO Snapshot
+
+foreign import ccall safe "rocksdb/c.h rocksdb_transaction_options_set_set_snapshot"
+  c_rocksdb_transactionoptions_set_set_snapshot :: TxnOpts -> CBool -> IO ()

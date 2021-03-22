@@ -1,20 +1,25 @@
-{-# LANGUAGE BinaryLiterals    #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections     #-}
 
 module Main where
 
-import           Data.Default            (def)
-import           Data.String.Conversions
-import           Database.RocksDB
-import           Test.Hspec              (describe, hspec, it, shouldReturn)
-import           UnliftIO
+import Data.String.Conversions (cs)
+import Database.RocksDB (DB, get, put, delete, withDB, getCF, putCF, txnGetForUpdate,
+           createIfMissing, errorIfExists, bloomFilter, maxFiles,
+           prefixLength, paranoidChecks, Config(..), columnFamilies,
+           withDBCF, withTxnDB, txnBegin, txnCommit, txnPut, txnGet, txnDelete)
+import Test.Hspec (describe, hspec, it, shouldReturn, shouldBe, shouldThrow)
+import UnliftIO (MonadUnliftIO, wait, async, withSystemTempDirectory)
+import System.IO.Error (isUserError)
 
 conf :: Config
-conf = def { createIfMissing = True
+conf = Config {
+             createIfMissing = True
            , errorIfExists   = True
            , bloomFilter     = True
+           , maxFiles        = Nothing
            , prefixLength    = Just 3
+           , paranoidChecks  = False
            }
 
 withTestDB :: MonadUnliftIO m => FilePath -> (DB -> m a) -> m a
@@ -28,7 +33,123 @@ withTestDBCF path cfs =
 main :: IO ()
 main =  do
     hspec $ do
+        describe "Database engine with transactions" $ do
+            it "should lock keys whith txnGetForUpdate" $
+                withSystemTempDirectory "rocksdb-txn1" $ \path -> do
+                    let k = "k"
+                    let v = "v"
+                    let v2 = "v2"
+                    let v3 = "v3"
+                    let v4 = "v4"
+
+                    withTxnDB path conf $ \txnDB -> do
+                        txn <- txnBegin txnDB
+                        txnPut txn k v
+                        txnCommit txn
+
+                        -- lets try to see what happens if we try to write to a locked
+                        -- key from outside the transaction that locked it
+                        txn2 <- txnBegin txnDB
+                        txnGetForUpdate txn2 txnDB k `shouldReturn` (Just v)
+
+                        -- this is a different transaction now, started while txn3 is
+                        -- still locked
+                        txn3 <- txnBegin txnDB
+                        txnGet txn3 txnDB k `shouldReturn` (Just v)
+                        txnGetForUpdate txn3 txnDB k `shouldThrow` isUserError
+
+                        -- if we change something in txn2 (not committed yet) we see the
+                        -- change in txn2, but txn3 still sees the old version
+                        txnPut txn2 k v2
+                        txnGetForUpdate txn2 txnDB k `shouldReturn` (Just v2)
+                        txnGet txn3 txnDB k `shouldReturn` (Just v)
+
+                        -- as long as txn2 has the lock on the key, nobody else can lock
+                        -- it, no matter how hard they try, they will only get exceptions
+                        txnGetForUpdate txn3 txnDB k `shouldThrow` isUserError
+                        txn4 <- txnBegin txnDB
+                        txnGetForUpdate txn4 txnDB k `shouldThrow` isUserError
+
+                        -- if they try to change the locked key as well
+                        txnPut txn4 k "x" `shouldThrow` isUserError
+
+                        -- after txn2 commits, we can see the change from outside it
+                        txnCommit txn2
+                        txnGet txn3 txnDB k `shouldReturn` (Just v2)
+
+                        txnCommit txn3
+
+                        -- now that txn2 has committed, it is again possible to lock the
+                        -- key
+                        txnGetForUpdate txn4 txnDB k `shouldReturn` (Just v2)
+                        txnCommit txn4
+
+                        -- transactions can seemingly be reused but will throw an error
+                        -- when trying to commit them a second time
+                        txnGetForUpdate txn4 txnDB k `shouldReturn` (Just v2)
+                        txnPut txn4 k v3
+                        -- after locking the key once with getForUpdate it does not matter
+                        -- if we use it or regular get, we can see our change
+                        txnGetForUpdate txn4 txnDB k `shouldReturn` (Just v3)
+                        txnGet txn4 txnDB k `shouldReturn` (Just v3)
+
+                        -- outside of txn4 the change is not visible yet, of course.
+                        txnGet txn3 txnDB k `shouldReturn` (Just v2)
+
+                        -- committing an already committed transaction is illegal
+                        txnCommit txn4 `shouldThrow` isUserError
+
+                        -- but the key is still locked
+                        txn5 <- txnBegin txnDB
+                        txnPut txn5 k "x" `shouldThrow` isUserError
+                        -- the lesson learned is that we need to make sure that
+                        -- transactions cannot be reused
+
+                    -- if the db is closed and reopened in another handle, uncommitted
+                    -- transactions are aborted, letting us access the key again.
+                    withTxnDB path (conf{ errorIfExists = False }) $ \txnDB2 -> do
+                        txn6 <- txnBegin txnDB2
+                        txn7 <- txnBegin txnDB2
+                        txnPut txn6 k v4
+                        txnGet txn6 txnDB2 k `shouldReturn` (Just v4)
+                        txnDelete txn6 k
+                        txnGet txn6 txnDB2 k `shouldReturn` Nothing
+                        -- outside of txn6 the key still exists as v2
+                        txnGet txn7 txnDB2 k `shouldReturn` (Just v2)
+
+                        -- after commit it is gone for everyone
+                        txnCommit txn6
+                        txnGet txn7 txnDB2 k `shouldReturn` Nothing
+
+
+            it "should support open, begin, put, get, getForUpdate, commit" $
+                withSystemTempDirectory "rocksdb-txn1" $ \path -> do
+                    withTxnDB path conf $ \txnDB -> do
+                        let (k,v) = ("k","v")
+
+                        -- write a key in a transaction
+                        txn <- txnBegin txnDB
+                        txnGet txn txnDB k `shouldReturn` Nothing
+                        txnGetForUpdate txn txnDB k `shouldReturn` Nothing
+                        txnPut txn k v
+                        txnGet txn txnDB k `shouldReturn` (Just v)
+                        txnGetForUpdate txn txnDB k `shouldReturn` (Just v)
+                        txnCommit txn
+
+                        -- now try reading the key again in another transaction
+                        txn2 <- txnBegin txnDB
+                        getResult2 <- txnGet txn2 txnDB k
+                        txnGetForUpdate txn2 txnDB k `shouldReturn` (Just v)
+                        txnCommit txn2
+                        getResult2 `shouldBe` (Just v)
+
         describe "Database engine" $ do
+            it "should store and delete items" $
+                withSystemTempDirectory "rocksdb-delete" $ \path ->
+                withTestDB path $ \db -> do
+                    put db "zzz" "zzz"
+                    delete db "zzz"
+                    get db "zzz" `shouldReturn` Nothing
             it "should put items into the database and retrieve them" $
                 withSystemTempDirectory "rocksdb1" $ \path ->
                 withTestDB path $ \db -> do

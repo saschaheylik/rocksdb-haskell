@@ -12,9 +12,12 @@
 module Database.RocksDB.Internal
     ( Config (..)
     , DB (..)
+    , TxnDB (..)
 
     -- * Smart constructors & extractors
     , withOptions
+    , withTxnDBOpts
+    , withTxnOpts
     , withOptionsCF
     , withReadOpts
     , withWriteOpts
@@ -27,6 +30,7 @@ module Database.RocksDB.Internal
     , intToCInt
     , cIntToInt
     , boolToNum
+    , boolToCBool
     ) where
 
 import           Control.Monad
@@ -40,6 +44,13 @@ data DB = DB { rocksDB        :: !RocksDB
              , readOpts       :: !ReadOpts
              , writeOpts      :: !WriteOpts
              }
+
+data TxnDB = TxnDB { txnRocksDB        :: !TxnRocksDB
+                   , txnColumnFamilies :: ![ColumnFamily]
+                   , txnReadOpts       :: !ReadOpts
+                   , txnWriteOpts      :: !WriteOpts
+                   , txnTxnOpts        :: !TxnOpts
+                   }
 
 data Config = Config { createIfMissing :: !Bool
                      , errorIfExists   :: !Bool
@@ -57,6 +68,17 @@ instance Default Config where
                  , prefixLength     = Nothing
                  , bloomFilter      = False
                  }
+withTxnOpts :: MonadUnliftIO m => Config -> (TxnOpts -> m a) -> m a
+withTxnOpts config f = bracket
+                            (liftIO c_rocksdb_transaction_options_create)
+                            (liftIO . c_rocksdb_transaction_options_destroy)
+                            f
+
+withTxnDBOpts :: MonadUnliftIO m => Config -> (TxnDBOpts-> m a) -> m a
+withTxnDBOpts config f = bracket
+                            (liftIO c_rocksdb_transactiondb_options_create)
+                            (liftIO . c_rocksdb_transactiondb_options_destroy)
+                            f
 
 withOptions :: MonadUnliftIO m => Config -> (Options -> m a) -> m a
 withOptions Config {..} f =

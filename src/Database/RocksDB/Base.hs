@@ -15,8 +15,9 @@
 module Database.RocksDB.Base
     ( -- * Exported Types
       DB (..)
-    , BatchOp (..)
-    , Range
+    , TxnDB (..)
+    -- , BatchOp (..)
+    -- , Range
     , ColumnFamily
 
     -- * Options
@@ -24,24 +25,31 @@ module Database.RocksDB.Base
 
     -- * Basic Database Manipulations
     , withDB
+    , txnBegin
+    , txnCommit
+    , txnPut
+    , txnGet
+    , txnDelete
+    , txnGetForUpdate
+    , withTxnDB
     , withDBCF
     , put
     , putCF
     , delete
-    , deleteCF
-    , write
+    -- , deleteCF
+    -- , write
     , get
     , getCF
-    , withSnapshot
+    -- , withSnapshot
 
     -- * Administrative Functions
-    , Property (..), getProperty
-    , destroy
-    , repair
-    , approximateSize
+    -- , Property (..), getProperty
+    -- , destroy
+    -- , repair
+    -- , approximateSize
 
     -- * Iteration
-    , module Database.RocksDB.Iterator
+    -- , module Database.RocksDB.Iterator
     ) where
 
 import           Control.Monad             (when, (>=>), forM)
@@ -52,9 +60,10 @@ import qualified Data.ByteString.Unsafe    as BU
 import           Database.RocksDB.C
 import           Database.RocksDB.Internal
 import           Database.RocksDB.Iterator
-import           UnliftIO
-import           UnliftIO.Directory
-import           UnliftIO.Foreign
+import           UnliftIO (MonadIO, MonadUnliftIO, liftIO, bracket)
+import           UnliftIO.Directory (createDirectoryIfMissing, listDirectory)
+import           UnliftIO.Foreign (CString, Int64, withCString, touchForeignPtr, nullPtr,
+                    peek, alloca, peekArray, withArray, allocaArray, pokeArray)
 
 -- | Properties exposed by RocksDB
 data Property = NumFilesAtLevel Int | Stats | SSTables
@@ -65,6 +74,41 @@ data BatchOp = Put !ByteString !ByteString
              | PutCF !ColumnFamily !ByteString !ByteString
              | DelCF !ColumnFamily !ByteString
              deriving (Eq, Show)
+
+txnBegin :: TxnDB -> IO Txn
+txnBegin db = do
+    c_rocksdb_transaction_begin (txnRocksDB db) (txnWriteOpts db) (txnTxnOpts db) (intToCInt 0)
+
+txnCommit :: Txn -> IO ()
+txnCommit txn = throwIfErr "commit" $ c_rocksdb_transaction_commit txn
+
+-- | Open a transaction database.
+--
+-- The returned handle should be released with 'close'.
+withTxnDB :: MonadUnliftIO m => FilePath -> Config -> (TxnDB -> m a) -> m a
+withTxnDB path config f =
+    withTxnDBOpts config $ \txn_db_opts_ptr ->
+    withOptions config $ \opts_ptr ->
+    withTxnOpts config $ \txn_opts ->
+    withReadOpts Nothing $ \read_opts ->
+    withWriteOpts $ \write_opts ->
+    bracket (create_txn_db opts_ptr txn_db_opts_ptr read_opts write_opts txn_opts) destroy_db $
+        \txnDB -> f txnDB
+  where
+    destroy_db db = liftIO $ do
+        c_rocksdb_transactiondb_close $ txnRocksDB db
+    create_txn_db opts_ptr txn_db_opts_ptr read_opts write_opts txn_opts = do
+        when (createIfMissing config) $
+            createDirectoryIfMissing True path
+        withCString path $ \path_ptr -> do
+            db_ptr <- liftIO . throwIfErr "open" $
+                c_rocksdb_transactiondb_open opts_ptr txn_db_opts_ptr path_ptr
+            return TxnDB { txnRocksDB = db_ptr
+                      , txnColumnFamilies = []
+                      , txnReadOpts = read_opts
+                      , txnWriteOpts = write_opts
+                      , txnTxnOpts = txn_opts
+                      }
 
 -- | Open a database.
 --
@@ -234,17 +278,26 @@ putCF db cf = putCommon db (Just cf)
 
 putCommon :: MonadIO m => DB -> Maybe ColumnFamily -> ByteString -> ByteString -> m ()
 putCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key value = liftIO $
-    BU.unsafeUseAsCStringLen key   $ \(key_ptr, klen) ->
-    BU.unsafeUseAsCStringLen value $ \(val_ptr, vlen) ->
+    BU.unsafeUseAsCStringLen key   $ \(kptr, klen) ->
+    BU.unsafeUseAsCStringLen value $ \(vptr, vlen) ->
         throwIfErr "put" $ case mcf of
             Just cf -> c_rocksdb_put_cf
                       db_ptr write_opts cf
-                      key_ptr (intToCSize klen)
-                      val_ptr (intToCSize vlen)
+                      kptr (intToCSize klen)
+                      vptr (intToCSize vlen)
             Nothing -> c_rocksdb_put
                       db_ptr write_opts
-                      key_ptr (intToCSize klen)
-                      val_ptr (intToCSize vlen)
+                      kptr (intToCSize klen)
+                      vptr (intToCSize vlen)
+
+txnPut :: MonadIO m => Txn -> ByteString -> ByteString -> m ()
+txnPut txn key value = liftIO $
+    BU.unsafeUseAsCStringLen key   $ \(kptr, klen) ->
+    BU.unsafeUseAsCStringLen value $ \(vptr, vlen) ->
+        throwIfErr "put" $ c_rocksdb_transaction_put
+                                txn
+                                kptr (intToCSize klen)
+                                vptr (intToCSize vlen)
 
 -- | Read a value by key.
 get :: MonadIO m => DB -> ByteString -> m (Maybe ByteString)
@@ -253,25 +306,51 @@ get db = getCommon db Nothing
 getCF :: MonadIO m => DB -> ColumnFamily -> ByteString -> m (Maybe ByteString)
 getCF db cf = getCommon db (Just cf)
 
+mGetResult vlen_ptr val_ptr = do
+    vlen <- peek vlen_ptr
+    if val_ptr == nullPtr
+        then return Nothing
+        else do
+            res' <- Just <$> BS.packCStringLen (val_ptr, cSizeToInt vlen)
+            freeCString val_ptr
+            return res'
+
+txnGetForUpdate :: MonadIO m => Txn -> TxnDB -> ByteString -> m (Maybe ByteString)
+txnGetForUpdate txn txnDB key = liftIO $
+    BU.unsafeUseAsCStringLen key $ \(kptr, klen) ->
+    alloca                       $ \vlen_ptr -> do
+        val_ptr <- throwIfErr "get" $ c_rocksdb_transaction_get_for_update
+                                            txn
+                                            (txnReadOpts txnDB)
+                                            kptr (intToCSize klen)
+                                            vlen_ptr
+                                            (boolToCBool True) -- exclusive lock
+        mGetResult vlen_ptr val_ptr
+
+txnGet :: MonadIO m => Txn -> TxnDB -> ByteString -> m (Maybe ByteString)
+txnGet txn txnDB key = liftIO $
+    BU.unsafeUseAsCStringLen key $ \(kptr, klen) ->
+    alloca                       $ \vlen_ptr -> do
+        val_ptr <- throwIfErr "get" $ c_rocksdb_transaction_get
+                                            txn
+                                            (txnReadOpts txnDB)
+                                            kptr (intToCSize klen)
+                                            vlen_ptr
+        mGetResult vlen_ptr val_ptr
+
 getCommon :: MonadIO m => DB -> Maybe ColumnFamily -> ByteString -> m (Maybe ByteString)
 getCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf key = liftIO $
-    BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+    BU.unsafeUseAsCStringLen key $ \(kptr, klen) ->
     alloca                       $ \vlen_ptr -> do
         val_ptr <- throwIfErr "get" $
             case mcf of
                 Just cf -> c_rocksdb_get_cf
                            db_ptr read_opts cf
-                           key_ptr (intToCSize klen) vlen_ptr
+                           kptr (intToCSize klen) vlen_ptr
                 Nothing -> c_rocksdb_get
                            db_ptr read_opts
-                           key_ptr (intToCSize klen) vlen_ptr
-        vlen <- peek vlen_ptr
-        if val_ptr == nullPtr
-            then return Nothing
-            else do
-                res' <- Just <$> BS.packCStringLen (val_ptr, cSizeToInt vlen)
-                freeCString val_ptr
-                return res'
+                           kptr (intToCSize klen) vlen_ptr
+        mGetResult vlen_ptr val_ptr
 
 delete :: MonadIO m => DB -> ByteString -> m ()
 delete db = deleteCommon db Nothing
@@ -282,10 +361,16 @@ deleteCF db cf = deleteCommon db (Just cf)
 -- | Delete a key/value pair.
 deleteCommon :: MonadIO m => DB -> Maybe ColumnFamily -> ByteString -> m ()
 deleteCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key = liftIO $
-    BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+    BU.unsafeUseAsCStringLen key $ \(kptr, klen) ->
     throwIfErr "delete" $ case mcf of
-    Just cf -> c_rocksdb_delete_cf db_ptr write_opts cf key_ptr (intToCSize klen)
-    Nothing -> c_rocksdb_delete db_ptr write_opts key_ptr (intToCSize klen)
+    Just cf -> c_rocksdb_delete_cf db_ptr write_opts cf kptr (intToCSize klen)
+    Nothing -> c_rocksdb_delete db_ptr write_opts kptr (intToCSize klen)
+
+txnDelete :: MonadIO m => Txn -> ByteString -> m ()
+txnDelete txn key = liftIO $
+    BU.unsafeUseAsCStringLen key $ \(kptr, klen) ->
+        throwIfErr "delete" $
+            c_rocksdb_transaction_delete txn kptr (intToCSize klen)
 
 -- | Perform a batch mutation.
 write :: MonadIO m => DB -> [BatchOp] -> m ()
@@ -300,31 +385,31 @@ write DB{rocksDB = db_ptr, writeOpts = write_opts} batch = liftIO $
         mapM_ (liftIO . touch) batch
   where
     batchAdd batch_ptr (Put key val) =
-        BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+        BU.unsafeUseAsCStringLen key $ \(kptr, klen) ->
         BU.unsafeUseAsCStringLen val $ \(val_ptr, vlen) ->
             c_rocksdb_writebatch_put
             batch_ptr
-            key_ptr (intToCSize klen)
+            kptr (intToCSize klen)
             val_ptr (intToCSize vlen)
     batchAdd batch_ptr (PutCF cf_ptr key val) =
-        BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+        BU.unsafeUseAsCStringLen key $ \(kptr, klen) ->
         BU.unsafeUseAsCStringLen val $ \(val_ptr, vlen) ->
             c_rocksdb_writebatch_put_cf
             batch_ptr
             cf_ptr
-            key_ptr (intToCSize klen)
+            kptr (intToCSize klen)
             val_ptr (intToCSize vlen)
     batchAdd batch_ptr (Del key) =
-        BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+        BU.unsafeUseAsCStringLen key $ \(kptr, klen) ->
             c_rocksdb_writebatch_delete
             batch_ptr
-            key_ptr (intToCSize klen)
+            kptr (intToCSize klen)
     batchAdd batch_ptr (DelCF cf_ptr key) =
-        BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+        BU.unsafeUseAsCStringLen key $ \(kptr, klen) ->
             c_rocksdb_writebatch_delete_cf
             batch_ptr
             cf_ptr
-            key_ptr (intToCSize klen)
+            kptr (intToCSize klen)
     touch (Put (PS p _ _) (PS p' _ _)) = do
         touchForeignPtr p
         touchForeignPtr p'

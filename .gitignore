@@ -16,3 +16,4 @@ cabal.config
 .stack-work
 librocksdb.so
 *.liquid
+halive.json
