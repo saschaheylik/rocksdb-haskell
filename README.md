@@ -6,3 +6,5 @@ Consider this experimential.
 
 Look at the "Database engine with transactions" section of test/tests.hs as an example of
 how it can be used.
+
+Benchmark and comparison with PostgreSQL at https://github.com/saschaheylik/haskell-rocksdb-vs-postgresql-test-and-benchmark
