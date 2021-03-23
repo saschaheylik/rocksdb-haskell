@@ -34,6 +34,39 @@ main :: IO ()
 main =  do
     hspec $ do
         describe "Database engine with transactions" $ do
+            it "does not return consistent reads across multiple keys using txnGet alone" $
+                withSystemTempDirectory "rocksdb-txn1" $ \path -> do
+                    withTxnDB path conf $ \txnDB -> do
+                        -- lets suppose we have two keys, k1:v1 and k2:v2.
+                        -- they should be written and read atomically as a pair
+                        txn <- txnBegin txnDB
+                        txnPut txn "k1" "v1"
+                        txnPut txn "k2" "v2"
+                        txnCommit txn
+
+                        -- now in one transaction we try to read them,
+                        -- expecting them to still be k1:v1 and k2:v2
+                        txn2 <- txnBegin txnDB
+                        txnGet txn2 txnDB "k1" `shouldReturn` Just "v1"
+                        -- now there is a pause in txn2 for whatever reason, maybe we do
+                        -- a bit of work processing the result before getting k2.
+                        -- and unfortunately exactly in the middle of this pause someone
+                        -- else (txn3) comes along and changes k1 and k2
+
+                        -- but if we only used txnGet and not txnGetForUpdate, they were
+                        -- not locked and can be changed (including k2 which we have not
+                        -- read yet
+                        txn3 <- txnBegin txnDB
+                        txnPut txn3 "k1" "v1.2"
+                        txnPut txn3 "k2" "v2.2"
+                        txnCommit txn3
+
+                        -- now txn2 reads k2 which now is v2.2 even though we wanted it to
+                        -- still read it as v2
+                        txnGet txn2 txnDB "k2" `shouldReturn` Just "v2.2"
+                        txnCommit txn2
+                    
+
             it "should lock keys whith txnGetForUpdate" $
                 withSystemTempDirectory "rocksdb-txn1" $ \path -> do
                     let k = "k"
