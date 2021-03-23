@@ -6,7 +6,7 @@ module Main where
 import Data.String.Conversions (cs)
 import Database.RocksDB (DB, get, put, delete, withDB, getCF, putCF, txnGetForUpdate,
            createIfMissing, errorIfExists, bloomFilter, maxFiles,
-           prefixLength, paranoidChecks, Config(..), columnFamilies,
+           prefixLength, paranoidChecks, Config(..), columnFamilies, withTxn,
            withDBCF, withTxnDB, txnBegin, txnCommit, txnPut, txnGet, txnDelete)
 import Test.Hspec (describe, hspec, it, shouldReturn, shouldBe, shouldThrow)
 import UnliftIO (MonadUnliftIO, wait, async, withSystemTempDirectory)
@@ -34,8 +34,15 @@ main :: IO ()
 main =  do
     hspec $ do
         describe "Database engine with transactions" $ do
-            it "does not return consistent reads across multiple keys using txnGet alone" $
+            it "can run operations in a transaction using withTxn" $
                 withSystemTempDirectory "rocksdb-txn1" $ \path -> do
+                    withTxnDB path conf $ \txnDB -> do
+                        withTxn txnDB $ \txn -> txnGet txn txnDB "k1" `shouldReturn` Nothing
+                        withTxn txnDB $ \txn -> txnPut txn "k1" "v1"
+                        withTxn txnDB $ \txn -> txnGet txn txnDB "k1" `shouldReturn` Just "v1"
+
+            it "does not return consistent reads across multiple keys using txnGet alone" $
+                withSystemTempDirectory "rocksdb-txn2" $ \path -> do
                     withTxnDB path conf $ \txnDB -> do
                         -- lets suppose we have two keys, k1:v1 and k2:v2.
                         -- they should be written and read atomically as a pair
@@ -68,7 +75,7 @@ main =  do
                     
 
             it "should lock keys whith txnGetForUpdate" $
-                withSystemTempDirectory "rocksdb-txn1" $ \path -> do
+                withSystemTempDirectory "rocksdb-txn3" $ \path -> do
                     let k = "k"
                     let v = "v"
                     let v2 = "v2"

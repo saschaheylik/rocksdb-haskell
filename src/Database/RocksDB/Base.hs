@@ -23,8 +23,8 @@ module Database.RocksDB.Base
     -- * Options
     , Config (..)
 
-    -- * Basic Database Manipulations
     , withDB
+    , withTxn
     , txnBegin
     , txnCommit
     , txnPut
@@ -218,6 +218,10 @@ withSnapshot db@DB{rocksDB = db_ptr} f =
         snap_ptr <- c_rocksdb_create_snapshot db_ptr
         withReadOpts (Just snap_ptr) $ \read_opts ->
             return (db{readOpts = read_opts}, snap_ptr)
+
+withTxn :: MonadUnliftIO m => TxnDB -> (Txn -> m a) -> m a
+withTxn db = bracket (liftIO $ txnBegin db)
+                       (\txn -> liftIO $ txnCommit txn)
 
 -- | Get a DB property.
 getProperty :: MonadIO m => DB -> Property -> m (Maybe ByteString)
