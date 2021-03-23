@@ -58,6 +58,7 @@ data Config = Config { createIfMissing :: !Bool
                      , maxFiles        :: !(Maybe Int)
                      , prefixLength    :: !(Maybe Int)
                      , bloomFilter     :: !Bool
+                     , sync            :: !Bool
                      } deriving (Eq, Show)
 
 instance Default Config where
@@ -67,6 +68,7 @@ instance Default Config where
                  , maxFiles         = Nothing
                  , prefixLength     = Nothing
                  , bloomFilter      = False
+                 , sync             = True
                  }
 withTxnOpts :: MonadUnliftIO m => Config -> (TxnOpts -> m a) -> m a
 withTxnOpts config f = bracket
@@ -140,10 +142,13 @@ withReadOpts maybe_snap_ptr =
         forM_ maybe_snap_ptr $ c_rocksdb_readoptions_set_snapshot read_opts_ptr
         return read_opts_ptr
 
-withWriteOpts :: MonadUnliftIO m => (WriteOpts -> m a) -> m a
-withWriteOpts =
+withWriteOpts :: MonadUnliftIO m => Config -> (WriteOpts -> m a) -> m a
+withWriteOpts conf =
     bracket
-    (liftIO c_rocksdb_writeoptions_create)
+    (liftIO $ do
+        writeOpts <- c_rocksdb_writeoptions_create
+        c_rocksdb_writeoptions_set_sync writeOpts (boolToCBool $ sync conf)
+        return writeOpts)
     (liftIO . c_rocksdb_writeoptions_destroy)
 
 freeCString :: CString -> IO ()

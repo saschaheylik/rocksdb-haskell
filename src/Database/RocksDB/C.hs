@@ -103,6 +103,7 @@ module Database.RocksDB.C
     , c_rocksdb_transaction_get
     , c_rocksdb_transaction_delete
     , c_rocksdb_transaction_get_for_update
+    , c_rocksdb_writeoptions_set_sync
     ) where
 
 import           Foreign
@@ -553,5 +554,5 @@ foreign import ccall safe "rocksdb/c.h rocksdb_transactiondb_delete"
 foreign import ccall safe "rocksdb/c.h rocksdb_transaction_get_snapshot"
   c_rocksdb_transaction_get_snapshot :: Txn -> IO Snapshot
 
-foreign import ccall safe "rocksdb/c.h rocksdb_transaction_options_set_set_snapshot"
-  c_rocksdb_transactionoptions_set_set_snapshot :: TxnOpts -> CBool -> IO ()
+foreign import ccall safe "rocksdb/c.h rocksdb_writeoptions_set_sync"
+  c_rocksdb_writeoptions_set_sync :: WriteOpts -> CBool -> IO ()

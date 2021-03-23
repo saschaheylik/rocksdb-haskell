@@ -91,7 +91,7 @@ withTxnDB path config f =
     withOptions config $ \opts_ptr ->
     withTxnOpts config $ \txn_opts ->
     withReadOpts Nothing $ \read_opts ->
-    withWriteOpts $ \write_opts ->
+    withWriteOpts config $ \write_opts ->
     bracket (create_txn_db opts_ptr txn_db_opts_ptr read_opts write_opts txn_opts) destroy_db $
         \txnDB -> f txnDB
   where
@@ -117,7 +117,7 @@ withDB :: MonadUnliftIO m => FilePath -> Config -> (DB -> m a) -> m a
 withDB path config f =
     withOptions config $ \opts_ptr ->
     withReadOpts Nothing $ \read_opts ->
-    withWriteOpts $ \write_opts ->
+    withWriteOpts config $ \write_opts ->
     bracket (create_db opts_ptr read_opts write_opts) destroy_db f
   where
     destroy_db db = liftIO $
@@ -144,7 +144,7 @@ withDBCF path config cf_cfgs f =
     withOptions config $ \opts_ptr ->
     withOptionsCF (map snd cf_cfgs) $ \cf_opts ->
     withReadOpts Nothing $ \read_opts ->
-    withWriteOpts $ \write_opts ->
+    withWriteOpts config $ \write_opts ->
     withStrings (map fst cf_cfgs) $ \cf_names ->
     allocaArray (length cf_cfgs + 1) $ \cf_names_array ->
     allocaArray (length cf_cfgs + 1) $ \cf_opts_array ->

@@ -20,6 +20,8 @@ conf = Config {
            , maxFiles        = Nothing
            , prefixLength    = Just 3
            , paranoidChecks  = False
+           -- synchronous writes. rocksdb default is false (= async)
+           , sync            = True
            }
 
 withTestDB :: MonadUnliftIO m => FilePath -> (DB -> m a) -> m a
